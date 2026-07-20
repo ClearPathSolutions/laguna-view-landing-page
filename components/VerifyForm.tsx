@@ -170,7 +170,7 @@ export default function VerifyForm() {
               </a>
             </div>
           ) : (
-            <form onSubmit={onSubmit} noValidate>
+            <form id="verify-benefits-form" onSubmit={onSubmit} noValidate>
               <h3 className="font-serif text-2xl text-ink">Verify my benefits</h3>
               <p className="mt-1 text-sm text-body">
                 Fields marked with <span className="text-gold">*</span> are required.
