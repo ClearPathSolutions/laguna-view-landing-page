@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { FORM_INSURERS, PHONE_DISPLAY, PHONE_TEL } from "@/lib/site";
+import { PHONE_DISPLAY, PHONE_TEL } from "@/lib/site";
 import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
@@ -140,16 +140,14 @@ export default function VerifyForm() {
                   <label className={label} htmlFor="insurer">
                     Insurance provider <span className="text-gold">*</span>
                   </label>
-                  <select id="insurer" name="insurer" className={field} required defaultValue="">
-                    <option value="" disabled>
-                      Select your provider
-                    </option>
-                    {FORM_INSURERS.map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
-                  </select>
+                  <input
+                    id="insurer"
+                    name="insurer"
+                    className={field}
+                    required
+                    autoComplete="off"
+                    placeholder="e.g. Aetna, Cigna, Blue Cross"
+                  />
                 </div>
                 <div>
                   <label className={label} htmlFor="memberId">
