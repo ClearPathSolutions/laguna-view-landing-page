@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PHONE_DISPLAY, PHONE_TEL } from "@/lib/site";
 import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
@@ -10,15 +10,16 @@ declare global {
   interface Window {
     __ctm?: {
       form: {
-        track: (
+        capture: (
           host: string,
           formReactorId: string,
+          form: HTMLElement | null,
           trackingNumber: string,
-          fields: Record<string, unknown>,
-          callback: () => void
+          fields: Record<string, unknown>
         ) => void;
       };
     };
+    __ctm_loaded?: Array<() => void>;
   }
 }
 
@@ -26,50 +27,7 @@ const CTM_HOST = "app.calltrackingmetrics.com";
 const CTM_FORM_REACTOR_ID =
   "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
 const CTM_TRACKING_NUMBER = "8664511021";
-
-type CtmLead = {
-  name: string;
-  phone: string;
-  dob: string;
-  insurer: string;
-  memberId: string;
-};
-
-// Sends the lead to the CTM FormReactor with the captured field VALUES
-// (per CTM's manual-tracking docs). The tracker (//264810.tctm.co/t.js) is
-// loaded via GTM, so it may be absent (blocked, or GTM not yet loaded) —
-// resolve no matter what so the lead is never lost to tracking.
-function trackCtmLead(lead: CtmLead): Promise<void> {
-  return new Promise((resolve) => {
-    const ctm = window.__ctm;
-    if (!ctm?.form?.track) return resolve();
-    const timer = setTimeout(resolve, 3000);
-    const done = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    try {
-      ctm.form.track(
-        CTM_HOST,
-        CTM_FORM_REACTOR_ID,
-        CTM_TRACKING_NUMBER,
-        {
-          country_code: "1",
-          name: lead.name,
-          phone: lead.phone,
-          custom: {
-            "date of birth": lead.dob,
-            "insurance provider": lead.insurer,
-            "member id": lead.memberId,
-          },
-        },
-        done
-      );
-    } catch {
-      done();
-    }
-  });
-}
+const FORM_ID = "verify-benefits-form";
 
 const field =
   "w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-ink placeholder:text-body/50 focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30";
@@ -78,20 +36,40 @@ const label = "mb-1.5 block text-sm font-medium text-ink";
 export default function VerifyForm() {
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
+  const ctmAttached = useRef(false);
+
+  // CTM Auto-Capture: attach the FormReactor to the form. The tracker
+  // (//264810.tctm.co/t.js) is loaded async via GTM, so if it isn't ready
+  // yet, queue the attach through __ctm_loaded, which the tracker drains.
+  useEffect(() => {
+    const attach = () => {
+      if (ctmAttached.current) return;
+      ctmAttached.current = true;
+      window.__ctm?.form.capture(
+        CTM_HOST,
+        CTM_FORM_REACTOR_ID,
+        document.getElementById(FORM_ID),
+        CTM_TRACKING_NUMBER,
+        {
+          country_code: "1",
+          name: ["firstName", "lastName"],
+          phone: "phone",
+          fields: ["dob", "insurer", "memberId"],
+        }
+      );
+    };
+    if (window.__ctm?.form?.capture) {
+      attach();
+    } else {
+      (window.__ctm_loaded = window.__ctm_loaded || []).push(attach);
+    }
+  }, []);
+
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setStatus("submitting");
     const form = e.currentTarget;
     const data = Object.fromEntries(new FormData(form).entries());
-
-    // Log the lead in CTM before the email goes out.
-    await trackCtmLead({
-      name: `${data.firstName ?? ""} ${data.lastName ?? ""}`.trim(),
-      phone: String(data.phone ?? ""),
-      dob: String(data.dob ?? ""),
-      insurer: String(data.insurer ?? ""),
-      memberId: String(data.memberId ?? ""),
-    });
 
     try {
       const res = await fetch("/api/verify", {
@@ -170,7 +148,10 @@ export default function VerifyForm() {
               </a>
             </div>
           ) : (
-            <form id="verify-benefits-form" onSubmit={onSubmit} noValidate>
+            <form id={FORM_ID} onSubmit={onSubmit} noValidate>
+              {/* CTM's capture script looks up an email field; we don't
+                  collect email, so give it an empty one to read. */}
+              <input type="hidden" id="email" name="email" value="" readOnly />
               <h3 className="font-serif text-2xl text-ink">Verify my benefits</h3>
               <p className="mt-1 text-sm text-body">
                 Fields marked with <span className="text-gold">*</span> are required.
