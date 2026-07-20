@@ -27,10 +27,19 @@ const CTM_FORM_REACTOR_ID =
   "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
 const CTM_TRACKING_NUMBER = "8664511021";
 
-// Sends the lead to the CTM FormReactor. The tracker (//264810.tctm.co/t.js)
-// is loaded via GTM, so it may be absent (blocked, or GTM not yet loaded) —
+type CtmLead = {
+  name: string;
+  phone: string;
+  dob: string;
+  insurer: string;
+  memberId: string;
+};
+
+// Sends the lead to the CTM FormReactor with the captured field VALUES
+// (per CTM's manual-tracking docs). The tracker (//264810.tctm.co/t.js) is
+// loaded via GTM, so it may be absent (blocked, or GTM not yet loaded) —
 // resolve no matter what so the lead is never lost to tracking.
-function trackCtmLead(fullName: string): Promise<void> {
+function trackCtmLead(lead: CtmLead): Promise<void> {
   return new Promise((resolve) => {
     const ctm = window.__ctm;
     if (!ctm?.form?.track) return resolve();
@@ -46,12 +55,12 @@ function trackCtmLead(fullName: string): Promise<void> {
         CTM_TRACKING_NUMBER,
         {
           country_code: "1",
-          name: fullName,
-          phone: "phone",
+          name: lead.name,
+          phone: lead.phone,
           custom: {
-            "date of birth": "dob",
-            "insurance provider": "insurer",
-            "member id": "memberId",
+            "date of birth": lead.dob,
+            "insurance provider": lead.insurer,
+            "member id": lead.memberId,
           },
         },
         done
@@ -75,9 +84,14 @@ export default function VerifyForm() {
     const form = e.currentTarget;
     const data = Object.fromEntries(new FormData(form).entries());
 
-    // Log the lead in CTM first, while the inputs still hold their values
-    // (the tracker reads dob/insurer/memberId from the DOM by field name).
-    await trackCtmLead(`${data.firstName ?? ""} ${data.lastName ?? ""}`.trim());
+    // Log the lead in CTM before the email goes out.
+    await trackCtmLead({
+      name: `${data.firstName ?? ""} ${data.lastName ?? ""}`.trim(),
+      phone: String(data.phone ?? ""),
+      dob: String(data.dob ?? ""),
+      insurer: String(data.insurer ?? ""),
+      memberId: String(data.memberId ?? ""),
+    });
 
     try {
       const res = await fetch("/api/verify", {
