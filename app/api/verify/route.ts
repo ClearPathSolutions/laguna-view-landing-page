@@ -13,6 +13,53 @@ type Lead = {
   memberId?: string;
 };
 
+const CTM_FORM_REACTOR_ID =
+  "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
+
+// Server-to-server submission to the CTM FormReactor (no CORS, no ad
+// blockers). Never throws — a CTM outage must not block lead delivery.
+async function sendToCtm(lead: Lead): Promise<boolean> {
+  const key = process.env.CTM_FORMREACTOR_KEY;
+  if (!key) {
+    console.error("[verify] CTM_FORMREACTOR_KEY not set; skipping CTM submission");
+    return false;
+  }
+  // CTM rejects submissions whose phone number isn't a valid dialable
+  // number, so normalize to bare digits without the leading country code.
+  let phone = String(lead.phone ?? "").replace(/\D/g, "");
+  if (phone.length === 11 && phone.startsWith("1")) phone = phone.slice(1);
+
+  const body = new URLSearchParams({
+    phone_number: phone,
+    country_code: "1",
+    caller_name: `${lead.firstName ?? ""} ${lead.lastName ?? ""}`.trim(),
+    "field[date of birth]": lead.dob || "",
+    "field[insurance provider]": lead.insurer || "",
+    "field[member id]": lead.memberId || "",
+  });
+
+  try {
+    const res = await fetch(
+      `https://api.calltrackingmetrics.com/api/v1/formreactor/${CTM_FORM_REACTOR_ID}?key=${key}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      }
+    );
+    const text = await res.text();
+    if (!res.ok) {
+      console.error("[verify] CTM formreactor error:", res.status, text);
+      return false;
+    }
+    console.log("[verify] CTM formreactor accepted:", text);
+    return true;
+  } catch (err) {
+    console.error("[verify] CTM formreactor request failed:", err);
+    return false;
+  }
+}
+
 function esc(v: unknown): string {
   return String(v ?? "")
     .replace(/&/g, "&amp;")
@@ -35,6 +82,8 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
+
+  await sendToCtm(lead);
 
   const to = process.env.LEAD_TO_EMAIL || LEAD_EMAIL;
   const from = process.env.LEAD_FROM_EMAIL || "Laguna View Website <onboarding@resend.dev>";

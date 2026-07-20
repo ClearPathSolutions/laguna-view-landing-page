@@ -1,32 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { PHONE_DISPLAY, PHONE_TEL } from "@/lib/site";
 import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
 
-declare global {
-  interface Window {
-    __ctm?: {
-      form: {
-        capture: (
-          host: string,
-          formReactorId: string,
-          form: HTMLElement | null,
-          trackingNumber: string,
-          fields: Record<string, unknown>
-        ) => void;
-      };
-    };
-    __ctm_loaded?: Array<() => void>;
-  }
-}
-
-const CTM_HOST = "app.calltrackingmetrics.com";
-const CTM_FORM_REACTOR_ID =
-  "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
-const CTM_TRACKING_NUMBER = "8664511021";
+// CTM FormReactor submission happens server-side in /api/verify.
 const FORM_ID = "verify-benefits-form";
 
 const field =
@@ -36,35 +16,6 @@ const label = "mb-1.5 block text-sm font-medium text-ink";
 export default function VerifyForm() {
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
-  const ctmAttached = useRef(false);
-
-  // CTM Auto-Capture: attach the FormReactor to the form. The tracker
-  // (//264810.tctm.co/t.js) is loaded async via GTM, so if it isn't ready
-  // yet, queue the attach through __ctm_loaded, which the tracker drains.
-  useEffect(() => {
-    const attach = () => {
-      if (ctmAttached.current) return;
-      ctmAttached.current = true;
-      window.__ctm?.form.capture(
-        CTM_HOST,
-        CTM_FORM_REACTOR_ID,
-        document.getElementById(FORM_ID),
-        CTM_TRACKING_NUMBER,
-        {
-          country_code: "1",
-          name: ["firstName", "lastName"],
-          phone: "phone",
-          fields: ["dob", "insurer", "memberId"],
-        }
-      );
-    };
-    if (window.__ctm?.form?.capture) {
-      attach();
-    } else {
-      (window.__ctm_loaded = window.__ctm_loaded || []).push(attach);
-    }
-  }, []);
-
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setStatus("submitting");
@@ -149,9 +100,6 @@ export default function VerifyForm() {
             </div>
           ) : (
             <form id={FORM_ID} onSubmit={onSubmit} noValidate>
-              {/* CTM's capture script looks up an email field; we don't
-                  collect email, so give it an empty one to read. */}
-              <input type="hidden" id="email" name="email" value="" readOnly />
               <h3 className="font-serif text-2xl text-ink">Verify my benefits</h3>
               <p className="mt-1 text-sm text-body">
                 Fields marked with <span className="text-gold">*</span> are required.
