@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: #011223;
+  --teal: #166876;
+  --gold: #c89241;
+}
+
+html {
+  scroll-behavior: smooth;
+  /* offset for sticky header when jumping to #anchors */
+  scroll-padding-top: 116px;
+}
+
+body {
+  background-color: #f4eee6;
+  color: #3f4e5d;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* clip (not hidden) so a stray wide element can't cause horizontal scroll
+     without turning the body into a scroll container — keeps the sticky header working */
+  overflow-x: clip;
+}
+
+@layer components {
+  .container-lp {
+    @apply mx-auto w-full max-w-content px-5 sm:px-8;
+  }
+
+  .eyebrow {
+    @apply text-sm font-semibold uppercase tracking-[0.18em] text-teal;
+  }
+
+  .h1 {
+    @apply font-serif text-4xl leading-[1.08] tracking-tight text-ink sm:text-5xl lg:text-6xl;
+  }
+
+  .h2 {
+    @apply font-serif text-3xl leading-[1.12] tracking-tight text-ink sm:text-4xl;
+  }
+
+  .h3 {
+    @apply font-serif text-xl font-medium text-ink sm:text-2xl;
+  }
+
+  .lead {
+    @apply text-lg leading-relaxed text-body;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-6 py-3.5 text-base font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2;
+  }
+
+  .btn-gold {
+    @apply btn bg-gold text-ink shadow-[0_10px_24px_-8px_rgba(200,146,65,0.55)] hover:bg-gold-600 hover:shadow-[0_14px_30px_-8px_rgba(200,146,65,0.65)] focus-visible:ring-gold active:translate-y-px;
+  }
+
+  .btn-outline {
+    @apply btn border border-teal/30 bg-white/70 text-teal backdrop-blur hover:border-teal hover:bg-white focus-visible:ring-teal;
+  }
+
+  .card {
+    @apply rounded-2xl bg-white p-6 shadow-card ring-1 ring-ink/5 transition-all duration-300 sm:p-8;
+  }
+}
+
+/* Hide scrollbar on the reviews rail while keeping it scrollable */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  * {
+    animation-duration: 0.001ms !important;
+  }
+}
