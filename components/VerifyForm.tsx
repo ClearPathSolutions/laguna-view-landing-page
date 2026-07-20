@@ -6,6 +6,62 @@ import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
 
+declare global {
+  interface Window {
+    __ctm?: {
+      form: {
+        track: (
+          host: string,
+          formReactorId: string,
+          trackingNumber: string,
+          fields: Record<string, unknown>,
+          callback: () => void
+        ) => void;
+      };
+    };
+  }
+}
+
+const CTM_HOST = "app.calltrackingmetrics.com";
+const CTM_FORM_REACTOR_ID =
+  "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
+const CTM_TRACKING_NUMBER = "8664511021";
+
+// Sends the lead to the CTM FormReactor. The tracker (//264810.tctm.co/t.js)
+// is loaded via GTM, so it may be absent (blocked, or GTM not yet loaded) —
+// resolve no matter what so the lead is never lost to tracking.
+function trackCtmLead(fullName: string): Promise<void> {
+  return new Promise((resolve) => {
+    const ctm = window.__ctm;
+    if (!ctm?.form?.track) return resolve();
+    const timer = setTimeout(resolve, 3000);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    try {
+      ctm.form.track(
+        CTM_HOST,
+        CTM_FORM_REACTOR_ID,
+        CTM_TRACKING_NUMBER,
+        {
+          country_code: "1",
+          name: fullName,
+          phone: "phone",
+          custom: {
+            "date of birth": "dob",
+            "insurance provider": "insurer",
+            "member id": "memberId",
+          },
+        },
+        done
+      );
+    } catch {
+      done();
+    }
+  });
+}
+
 const field =
   "w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-ink placeholder:text-body/50 focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30";
 const label = "mb-1.5 block text-sm font-medium text-ink";
@@ -13,12 +69,15 @@ const label = "mb-1.5 block text-sm font-medium text-ink";
 export default function VerifyForm() {
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
-
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setStatus("submitting");
     const form = e.currentTarget;
     const data = Object.fromEntries(new FormData(form).entries());
+
+    // Log the lead in CTM first, while the inputs still hold their values
+    // (the tracker reads dob/insurer/memberId from the DOM by field name).
+    await trackCtmLead(`${data.firstName ?? ""} ${data.lastName ?? ""}`.trim());
 
     try {
       const res = await fetch("/api/verify", {
