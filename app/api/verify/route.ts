@@ -20,11 +20,11 @@ const CTM_FORM_REACTOR_ID =
 
 // Server-to-server submission to the CTM FormReactor (no CORS, no ad
 // blockers). Never throws — a CTM outage must not block lead delivery.
-async function sendToCtm(lead: Lead): Promise<boolean> {
+async function sendToCtm(lead: Lead): Promise<string> {
   const key = process.env.CTM_FORMREACTOR_KEY;
   if (!key) {
     console.error("[verify] CTM_FORMREACTOR_KEY not set; skipping CTM submission");
-    return false;
+    return "no-key";
   }
   // CTM rejects submissions whose phone number isn't a valid dialable
   // number, so normalize to bare digits without the leading country code.
@@ -66,13 +66,13 @@ async function sendToCtm(lead: Lead): Promise<boolean> {
     const text = await res.text();
     if (!res.ok) {
       console.error("[verify] CTM formreactor error:", res.status, text);
-      return false;
+      return `rejected:${res.status}`;
     }
     console.log("[verify] CTM formreactor accepted:", text);
-    return true;
+    return "sent";
   } catch (err) {
     console.error("[verify] CTM formreactor request failed:", err);
-    return false;
+    return "error";
   }
 }
 
@@ -99,7 +99,7 @@ export async function POST(req: Request) {
     );
   }
 
-  await sendToCtm(lead);
+  const ctm = await sendToCtm(lead);
 
   const to = process.env.LEAD_TO_EMAIL || LEAD_EMAIL;
   const from = process.env.LEAD_FROM_EMAIL || "Laguna View Website <onboarding@resend.dev>";
@@ -136,6 +136,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       delivered: false,
+      ctm,
       message: "Thank you — an admissions specialist will call you shortly.",
     });
   }
@@ -164,6 +165,7 @@ export async function POST(req: Request) {
       return NextResponse.json({
         ok: true,
         delivered: false,
+        ctm,
         message: "Thank you — an admissions specialist will call you shortly.",
       });
     }
@@ -171,6 +173,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       delivered: true,
+      ctm,
       message: "Thank you — an admissions specialist will call you shortly.",
     });
   } catch (err) {
@@ -179,6 +182,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       delivered: false,
+      ctm,
       message: "Thank you — an admissions specialist will call you shortly.",
     });
   }
