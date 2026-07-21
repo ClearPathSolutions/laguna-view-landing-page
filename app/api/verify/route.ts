@@ -50,12 +50,17 @@ async function sendToCtm(lead: Lead): Promise<string> {
     body.set("custom_fields[landing_page_url]", lead.pageUrl);
     try {
       const params = new URL(lead.pageUrl).searchParams;
-      // Google Ads click ids, plus ValueTrack ids if the ad's final URL
-      // includes them (e.g. &campaignid={campaignid}).
+      // Google Ads click ids, UTM params, plus ValueTrack ids if the ad's
+      // final URL includes them (e.g. &campaignid={campaignid}).
       const attribution: Array<[string, string]> = [
         ["gclid", "gclid"],
         ["gbraid", "gbraid"],
         ["wbraid", "wbraid"],
+        ["utm_source", "utm_source"],
+        ["utm_medium", "utm_medium"],
+        ["utm_campaign", "utm_campaign"],
+        ["utm_content", "utm_content"],
+        ["utm_term", "utm_term"],
         ["campaignid", "campaign_id"],
         ["adgroupid", "adgroup_id"],
         ["creativeid", "creative_id"],
