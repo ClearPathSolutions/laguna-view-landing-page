@@ -84,6 +84,8 @@ async function sendToCtm(lead: Lead): Promise<string> {
     }
   }
 
+  console.log("[verify] CTM payload:", body.toString());
+
   try {
     const res = await fetch(
       `https://api.calltrackingmetrics.com/api/v1/formreactor/${CTM_FORM_REACTOR_ID}?key=${key}`,
