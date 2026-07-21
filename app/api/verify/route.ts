@@ -13,6 +13,7 @@ type Lead = {
   memberId?: string;
   ctmSid?: string;
   pageUrl?: string;
+  ctmTracked?: boolean;
 };
 
 const CTM_FORM_REACTOR_ID =
@@ -131,7 +132,9 @@ export async function POST(req: Request) {
     );
   }
 
-  const ctm = await sendToCtm(lead);
+  // The browser tracker already logged the lead in CTM (session-linked);
+  // only fall back to the REST API when that didn't happen.
+  const ctm = lead.ctmTracked ? "sent-by-browser" : await sendToCtm(lead);
 
   const to = process.env.LEAD_TO_EMAIL || LEAD_EMAIL;
   const from = process.env.LEAD_FROM_EMAIL || "Laguna View Website <onboarding@resend.dev>";

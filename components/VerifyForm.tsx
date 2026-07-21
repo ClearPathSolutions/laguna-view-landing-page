@@ -6,15 +6,65 @@ import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
 
-// CTM FormReactor submission happens server-side in /api/verify. We pass
-// along the CTM visitor session id + page URL so the lead keeps its ad
-// attribution (source, UTM params, gclid).
+// Leads go to CTM through the browser tracker (__ctm.form.track) so the
+// submission is tied to the visitor's web session — that's the only path
+// that gives CTM full session + paid-ads attribution. When the tracker is
+// unavailable (ad blocker), /api/verify falls back to CTM's REST API.
 const FORM_ID = "verify-benefits-form";
+const CTM_HOST = "app.calltrackingmetrics.com";
+const CTM_FORM_REACTOR_ID =
+  "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
+const CTM_TRACKING_NUMBER = "8664511021";
 
 declare global {
   interface Window {
-    __ctm?: { config?: { sid?: string } };
+    __ctm?: {
+      config?: { sid?: string };
+      form?: {
+        track: (
+          host: string,
+          formReactorId: string,
+          trackingNumber: string,
+          fields: Record<string, unknown>,
+          callback: () => void
+        ) => void;
+      };
+    };
   }
+}
+
+// Resolves true only if the tracker confirmed the submission; false means
+// the caller should fall back to the server-side REST submission.
+function trackCtmLead(fields: Record<string, string>): Promise<boolean> {
+  return new Promise((resolve) => {
+    const ctm = window.__ctm;
+    if (!ctm?.form?.track) return resolve(false);
+    const timer = setTimeout(() => resolve(false), 4000);
+    try {
+      ctm.form.track(
+        CTM_HOST,
+        CTM_FORM_REACTOR_ID,
+        CTM_TRACKING_NUMBER,
+        {
+          country_code: "1",
+          name: `${fields.firstName ?? ""} ${fields.lastName ?? ""}`.trim(),
+          phone: fields.phone ?? "",
+          custom: {
+            "date of birth": fields.dob ?? "",
+            "insurance provider": fields.insurer ?? "",
+            "member id": fields.memberId ?? "",
+          },
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(true);
+        }
+      );
+    } catch {
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
 }
 
 function getCtmSessionId(): string {
@@ -39,8 +89,15 @@ export default function VerifyForm() {
     e.preventDefault();
     setStatus("submitting");
     const form = e.currentTarget;
+    const fields = Object.fromEntries(new FormData(form).entries()) as Record<string, string>;
+
+    // Session-linked CTM submission via the tracker; tell the server
+    // whether it succeeded so it only falls back when needed.
+    const ctmTracked = await trackCtmLead(fields);
+
     const data = {
-      ...Object.fromEntries(new FormData(form).entries()),
+      ...fields,
+      ctmTracked,
       ctmSid: getCtmSessionId(),
       pageUrl: window.location.href,
     };
