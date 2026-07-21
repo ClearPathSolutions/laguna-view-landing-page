@@ -11,6 +11,8 @@ type Lead = {
   dob?: string;
   insurer?: string;
   memberId?: string;
+  ctmSid?: string;
+  pageUrl?: string;
 };
 
 const CTM_FORM_REACTOR_ID =
@@ -37,6 +39,20 @@ async function sendToCtm(lead: Lead): Promise<boolean> {
     "field[insurance provider]": lead.insurer || "",
     "field[member id]": lead.memberId || "",
   });
+
+  // Link the lead to the CTM visitor session so it keeps ad attribution
+  // (traffic source, UTM params, gclid), and record the URL/gclid as
+  // custom fields as a visible backup.
+  if (lead.ctmSid) body.set("visitor_sid", lead.ctmSid);
+  if (lead.pageUrl) {
+    body.set("field[landing page url]", lead.pageUrl);
+    try {
+      const gclid = new URL(lead.pageUrl).searchParams.get("gclid");
+      if (gclid) body.set("field[gclid]", gclid);
+    } catch {
+      // unparseable URL — still recorded verbatim above
+    }
+  }
 
   try {
     const res = await fetch(

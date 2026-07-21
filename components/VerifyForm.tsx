@@ -6,8 +6,27 @@ import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
 
-// CTM FormReactor submission happens server-side in /api/verify.
+// CTM FormReactor submission happens server-side in /api/verify. We pass
+// along the CTM visitor session id + page URL so the lead keeps its ad
+// attribution (source, UTM params, gclid).
 const FORM_ID = "verify-benefits-form";
+
+declare global {
+  interface Window {
+    __ctm?: { config?: { sid?: string } };
+  }
+}
+
+function getCtmSessionId(): string {
+  try {
+    const sid = window.__ctm?.config?.sid;
+    if (sid) return String(sid);
+    const m = document.cookie.match(/(?:^|;\s*)__ctmid=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  } catch {
+    return "";
+  }
+}
 
 const field =
   "w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-ink placeholder:text-body/50 focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30";
@@ -20,7 +39,11 @@ export default function VerifyForm() {
     e.preventDefault();
     setStatus("submitting");
     const form = e.currentTarget;
-    const data = Object.fromEntries(new FormData(form).entries());
+    const data = {
+      ...Object.fromEntries(new FormData(form).entries()),
+      ctmSid: getCtmSessionId(),
+      pageUrl: window.location.href,
+    };
 
     try {
       const res = await fetch("/api/verify", {
