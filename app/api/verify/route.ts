@@ -35,9 +35,11 @@ async function sendToCtm(lead: Lead): Promise<string> {
     phone_number: phone,
     country_code: "1",
     caller_name: `${lead.firstName ?? ""} ${lead.lastName ?? ""}`.trim(),
-    "field[date of birth]": lead.dob || "",
-    "field[insurance provider]": lead.insurer || "",
-    "field[member id]": lead.memberId || "",
+    // Custom fields use the REST API's custom_<api_name> format (the
+    // field[...] syntax is only understood by the browser tracker).
+    custom_date_of_birth: lead.dob || "",
+    custom_insurance_provider: lead.insurer || "",
+    custom_member_id: lead.memberId || "",
   });
 
   // Link the lead to the CTM visitor session so it keeps ad attribution
@@ -45,10 +47,10 @@ async function sendToCtm(lead: Lead): Promise<string> {
   // custom fields as a visible backup.
   if (lead.ctmSid) body.set("visitor_sid", lead.ctmSid);
   if (lead.pageUrl) {
-    body.set("field[landing page url]", lead.pageUrl);
+    body.set("custom_landing_page_url", lead.pageUrl);
     try {
       const gclid = new URL(lead.pageUrl).searchParams.get("gclid");
-      if (gclid) body.set("field[gclid]", gclid);
+      if (gclid) body.set("custom_gclid", gclid);
     } catch {
       // unparseable URL — still recorded verbatim above
     }
