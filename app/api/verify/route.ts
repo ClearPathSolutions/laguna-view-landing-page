@@ -52,15 +52,25 @@ async function sendToCtm(lead: Lead): Promise<string> {
       const params = new URL(lead.pageUrl).searchParams;
       // Google Ads click ids, UTM params, plus ValueTrack ids if the ad's
       // final URL includes them (e.g. &campaignid={campaignid}).
+      // Each UTM is sent under both the utm_* name and the name CTM's
+      // Paid Ads Data panel rows use; CTM ignores keys it doesn't know.
       const attribution: Array<[string, string]> = [
         ["gclid", "gclid"],
         ["gbraid", "gbraid"],
         ["wbraid", "wbraid"],
         ["utm_source", "utm_source"],
+        ["utm_source", "source"],
         ["utm_medium", "utm_medium"],
+        ["utm_medium", "medium"],
         ["utm_campaign", "utm_campaign"],
+        ["utm_campaign", "campaign"],
+        ["utm_campaign", "campaign_name"],
         ["utm_content", "utm_content"],
+        ["utm_content", "ad_content"],
+        ["utm_content", "content"],
         ["utm_term", "utm_term"],
+        ["utm_term", "keyword"],
+        ["utm_term", "term"],
         ["campaignid", "campaign_id"],
         ["adgroupid", "adgroup_id"],
         ["creativeid", "creative_id"],
