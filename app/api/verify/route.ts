@@ -11,17 +11,95 @@ type Lead = {
   dob?: string;
   insurer?: string;
   memberId?: string;
-  ctmSid?: string;
-  pageUrl?: string;
   ctmTracked?: boolean;
+  // Attribution, captured on first touch by lib/session.ts.
+  ctm_visitor_sid?: unknown;
+  page_url?: unknown;
+  landing_page_url?: unknown;
+  referrer?: unknown;
+  attribution?: unknown;
+  site_visit_id?: unknown;
 };
 
 const CTM_FORM_REACTOR_ID =
   "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
 
+/** CTM session ids are 24 hex characters, no dashes. A UUID is not one. */
+const CTM_ID = /^[0-9a-f]{24}$/i;
+
+/**
+ * The CTM visitor session id, preferring the browser's value and falling back
+ * to the __ctmid cookie. __ctmid is first-party on lagunaviewdetox.com, so it
+ * rides along on this same-origin POST — which means a client-side regression
+ * cannot silently un-attribute every lead.
+ *
+ * Returns null rather than substituting this site's own session id: CTM files
+ * the lead against no visit either way, and a plausible-looking wrong id would
+ * hide the fact that t.js was blocked.
+ */
+function ctmVisitorSid(lead: Lead, req: Request): string | null {
+  const fromClient = typeof lead.ctm_visitor_sid === "string" ? lead.ctm_visitor_sid : null;
+  if (fromClient && CTM_ID.test(fromClient)) return fromClient;
+
+  const raw = req.headers.get("cookie")?.match(/(?:^|;\s*)__ctmid=([^;]*)/)?.[1];
+  const fromCookie = raw ? decodeURIComponent(raw) : null;
+  if (fromCookie && CTM_ID.test(fromCookie)) {
+    if (fromClient) {
+      console.warn("[verify] browser sent a non-CTM sid; using the __ctmid cookie instead");
+    }
+    return fromCookie;
+  }
+  if (fromClient) {
+    // Log what we actually saw, but don't pass it on: CTM cannot match it, and
+    // a malformed visitor_sid risks CTM rejecting the whole submission. Losing
+    // an admissions enquiry to gain attribution is not a trade worth making.
+    console.warn(
+      "[verify] sid is not CTM-shaped and no __ctmid cookie — no visit will attach:",
+      fromClient.slice(0, 64)
+    );
+    return null;
+  }
+  console.warn("[verify] no CTM session id — t.js was likely blocked");
+  return null;
+}
+
+// This endpoint is public and unauthenticated, and `attribution` is shaped
+// entirely by the client, so take only keys we know and cap their size.
+const ATTRIBUTION_KEYS = [
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content",
+  "gclid",
+  "gbraid",
+  "wbraid",
+  "fbclid",
+  "msclkid",
+  "campaignid",
+  "adgroupid",
+  "creativeid",
+] as const;
+
+const MAX_VALUE_CHARS = 512;
+
+function cleanAttribution(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const key of ATTRIBUTION_KEYS) {
+    const v = (raw as Record<string, unknown>)[key];
+    if (typeof v === "string" && v) out[key] = v.slice(0, MAX_VALUE_CHARS);
+  }
+  return out;
+}
+
+function cleanUrl(raw: unknown): string {
+  return typeof raw === "string" ? raw.slice(0, 2048) : "";
+}
+
 // Server-to-server submission to the CTM FormReactor (no CORS, no ad
 // blockers). Never throws — a CTM outage must not block lead delivery.
-async function sendToCtm(lead: Lead): Promise<string> {
+async function sendToCtm(lead: Lead, sid: string | null): Promise<string> {
   const key = process.env.CTM_FORMREACTOR_KEY;
   if (!key) {
     console.error("[verify] CTM_FORMREACTOR_KEY not set; skipping CTM submission");
@@ -43,46 +121,55 @@ async function sendToCtm(lead: Lead): Promise<string> {
     "custom_fields[member_id]": lead.memberId || "",
   });
 
-  // Link the lead to the CTM visitor session so it keeps ad attribution
-  // (traffic source, UTM params, gclid), and record the URL/gclid as
-  // custom fields as a visible backup.
-  if (lead.ctmSid) body.set("visitor_sid", lead.ctmSid);
-  if (lead.pageUrl) {
-    body.set("custom_fields[landing_page_url]", lead.pageUrl);
-    try {
-      const params = new URL(lead.pageUrl).searchParams;
-      // Google Ads click ids, UTM params, plus ValueTrack ids if the ad's
-      // final URL includes them (e.g. &campaignid={campaignid}).
-      // Each UTM is sent under both the utm_* name and the name CTM's
-      // Paid Ads Data panel rows use; CTM ignores keys it doesn't know.
-      const attribution: Array<[string, string]> = [
-        ["gclid", "gclid"],
-        ["gbraid", "gbraid"],
-        ["wbraid", "wbraid"],
-        ["utm_source", "utm_source"],
-        ["utm_source", "source"],
-        ["utm_medium", "utm_medium"],
-        ["utm_medium", "medium"],
-        ["utm_campaign", "utm_campaign"],
-        ["utm_campaign", "campaign"],
-        ["utm_campaign", "campaign_name"],
-        ["utm_content", "utm_content"],
-        ["utm_content", "ad_content"],
-        ["utm_content", "content"],
-        ["utm_term", "utm_term"],
-        ["utm_term", "keyword"],
-        ["utm_term", "term"],
-        ["campaignid", "campaign_id"],
-        ["adgroupid", "adgroup_id"],
-        ["creativeid", "creative_id"],
-      ];
-      for (const [param, key] of attribution) {
-        const v = params.get(param);
-        if (v) body.set(`paid_attribution[${key}]`, v);
-      }
-    } catch {
-      // unparseable URL — still recorded verbatim above
-    }
+  // Link the lead to the CTM visitor session so it keeps ad attribution.
+  // 24 hex, no dashes — see ctmVisitorSid(). Omitted rather than faked when
+  // t.js was blocked, so an unattributed lead is visible instead of plausible.
+  if (sid) body.set("visitor_sid", sid);
+
+  // The real entry page, with its campaign — not the page the form sits on.
+  // Falls back to the current page only when nothing was ever captured.
+  const landing = cleanUrl(lead.landing_page_url) || cleanUrl(lead.page_url);
+  if (landing) body.set("custom_fields[landing_page_url]", landing);
+
+  // First-touch campaign, read from localStorage by the browser rather than
+  // from the URL at submit time. Reading it live is the whole Fault B: a
+  // visitor who lands on an ad and then reaches a clean URL submits as direct
+  // traffic, and the lead still delivers, so nothing ever surfaces the loss.
+  //
+  // Each UTM goes under both the utm_* name and the name CTM's Paid Ads Data
+  // panel rows use; CTM ignores keys it doesn't know. ValueTrack ids only
+  // arrive if the ad's final URL carries them (e.g. &campaignid={campaignid}).
+  const campaign = cleanAttribution(lead.attribution);
+  const CTM_ATTRIBUTION_KEYS: Array<[string, string]> = [
+    ["gclid", "gclid"],
+    ["gbraid", "gbraid"],
+    ["wbraid", "wbraid"],
+    ["utm_source", "utm_source"],
+    ["utm_source", "source"],
+    ["utm_medium", "utm_medium"],
+    ["utm_medium", "medium"],
+    ["utm_campaign", "utm_campaign"],
+    ["utm_campaign", "campaign"],
+    ["utm_campaign", "campaign_name"],
+    ["utm_content", "utm_content"],
+    ["utm_content", "ad_content"],
+    ["utm_content", "content"],
+    ["utm_term", "utm_term"],
+    ["utm_term", "keyword"],
+    ["utm_term", "term"],
+    ["campaignid", "campaign_id"],
+    ["adgroupid", "adgroup_id"],
+    ["creativeid", "creative_id"],
+  ];
+  for (const [param, ctmKey] of CTM_ATTRIBUTION_KEYS) {
+    const v = campaign[param];
+    if (v) body.set(`paid_attribution[${ctmKey}]`, v);
+  }
+  // gbraid/wbraid replace gclid under iOS and consent mode. CTM's own routing
+  // rules key on all three, so let either stand in for a missing gclid.
+  if (!campaign.gclid) {
+    const substitute = campaign.wbraid || campaign.gbraid;
+    if (substitute) body.set("paid_attribution[gclid]", substitute);
   }
 
   console.log("[verify] CTM payload:", body.toString());
@@ -132,13 +219,21 @@ export async function POST(req: Request) {
     );
   }
 
+  const sid = ctmVisitorSid(lead, req);
   // The browser tracker already logged the lead in CTM (session-linked);
   // only fall back to the REST API when that didn't happen.
-  const ctm = lead.ctmTracked ? "sent-by-browser" : await sendToCtm(lead);
+  const ctm = lead.ctmTracked ? "sent-by-browser" : await sendToCtm(lead, sid);
 
   const to = process.env.LEAD_TO_EMAIL || LEAD_EMAIL;
   const from = process.env.LEAD_FROM_EMAIL || "Laguna View Website <onboarding@resend.dev>";
   const apiKey = process.env.RESEND_API_KEY;
+
+  // Attribution goes in the email too, so marketing can reconcile a lead
+  // against CTM by hand when a visit failed to attach.
+  const campaign = cleanAttribution(lead.attribution);
+  const source = Object.entries(campaign)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(" · ");
 
   const rows: Array<[string, unknown]> = [
     ["Name", `${firstName} ${lastName}`],
@@ -146,6 +241,10 @@ export async function POST(req: Request) {
     ["Date of birth", lead.dob || "—"],
     ["Insurance provider", insurer],
     ["Member ID", lead.memberId || "—"],
+    ["Landing page", cleanUrl(lead.landing_page_url) || cleanUrl(lead.page_url) || "—"],
+    ["Referrer", cleanUrl(lead.referrer) || "direct"],
+    ["Campaign", source || "none captured"],
+    ["CTM visitor sid", sid || "none — t.js blocked, no visit attached"],
   ];
   const html = `
     <h2 style="font-family:Georgia,serif;color:#011223">New insurance verification lead</h2>

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { PHONE_DISPLAY, PHONE_TEL } from "@/lib/site";
+import { attributionPayload, recordPageview } from "@/lib/session";
 import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
@@ -10,32 +11,23 @@ type Status = "idle" | "submitting" | "success" | "error";
 // submission is tied to the visitor's web session — that's the only path
 // that gives CTM full session + paid-ads attribution. When the tracker is
 // unavailable (ad blocker), /api/verify falls back to CTM's REST API.
+//
+// Exactly one of those two paths runs per submission: the server only calls
+// the REST API when ctmTracked came back false. Nothing else on this site
+// captures form submits — the GTM container carries only GA4, Google Ads,
+// Clarity and CTM's t.js — so a lead is never sent twice.
 const FORM_ID = "verify-benefits-form";
 const CTM_HOST = "app.calltrackingmetrics.com";
 const CTM_FORM_REACTOR_ID =
   "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
 const CTM_TRACKING_NUMBER = "8664511021";
 
-declare global {
-  interface Window {
-    __ctm?: {
-      config?: { sid?: string };
-      form?: {
-        track: (
-          host: string,
-          formReactorId: string,
-          trackingNumber: string,
-          fields: Record<string, unknown>,
-          callback: () => void
-        ) => void;
-      };
-    };
-  }
-}
-
 // Resolves true only if the tracker confirmed the submission; false means
 // the caller should fall back to the server-side REST submission.
-function trackCtmLead(fields: Record<string, string>): Promise<boolean> {
+function trackCtmLead(
+  fields: Record<string, string>,
+  attribution: ReturnType<typeof attributionPayload>
+): Promise<boolean> {
   return new Promise((resolve) => {
     const ctm = window.__ctm;
     if (!ctm?.form?.track) return resolve(false);
@@ -53,6 +45,10 @@ function trackCtmLead(fields: Record<string, string>): Promise<boolean> {
             "date of birth": fields.dob ?? "",
             "insurance provider": fields.insurer ?? "",
             "member id": fields.memberId ?? "",
+            // First-touch entry page, not the page the form sits on. CTM's own
+            // session already carries the campaign; this is the visible backup
+            // for when the session was created after the query string was gone.
+            "landing page url": attribution.landing_page_url,
           },
         },
         () => {
@@ -65,17 +61,6 @@ function trackCtmLead(fields: Record<string, string>): Promise<boolean> {
       resolve(false);
     }
   });
-}
-
-function getCtmSessionId(): string {
-  try {
-    const sid = window.__ctm?.config?.sid;
-    if (sid) return String(sid);
-    const m = document.cookie.match(/(?:^|;\s*)__ctmid=([^;]+)/);
-    return m ? decodeURIComponent(m[1]) : "";
-  } catch {
-    return "";
-  }
 }
 
 const field =
@@ -91,16 +76,18 @@ export default function VerifyForm() {
     const form = e.currentTarget;
     const fields = Object.fromEntries(new FormData(form).entries()) as Record<string, string>;
 
+    // A visitor can land on an ad and submit before hydration has run
+    // SessionTracker; capture here too so the campaign is never lost. Re-running
+    // it is safe — it only rewrites first touch when the URL carries a fresh
+    // ad click, which at this point is the same click it already recorded.
+    recordPageview();
+    const attribution = attributionPayload();
+
     // Session-linked CTM submission via the tracker; tell the server
     // whether it succeeded so it only falls back when needed.
-    const ctmTracked = await trackCtmLead(fields);
+    const ctmTracked = await trackCtmLead(fields, attribution);
 
-    const data = {
-      ...fields,
-      ctmTracked,
-      ctmSid: getCtmSessionId(),
-      pageUrl: window.location.href,
-    };
+    const data = { ...fields, ...attribution, ctmTracked };
 
     try {
       const res = await fetch("/api/verify", {

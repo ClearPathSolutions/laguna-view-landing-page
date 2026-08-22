@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Fraunces, Inter } from "next/font/google";
 import Script from "next/script";
+import SessionTracker from "@/components/SessionTracker";
 import { BRAND, PHONE_DISPLAY } from "@/lib/site";
 import "./globals.css";
 
@@ -80,6 +81,9 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             style={{ display: "none", visibility: "hidden" }}
           />
         </noscript>
+        {/* Persists first-touch campaign data before the visitor can reach a
+            clean URL — see lib/session.ts */}
+        <SessionTracker />
         {children}
         <script
           type="application/ld+json"
