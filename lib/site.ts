@@ -11,6 +11,25 @@ export const BRAND = {
   tagline: "Private luxury detox & inpatient rehab. Confidential admissions available 24/7.",
 };
 
+// Third-party widget & tracking config.
+export const WIDGETS = {
+  // CallTrackingMetrics tracker (account 264810). Powers dynamic number
+  // insertion and mints the visitor session that Clarion attaches leads to.
+  // CTM receives no form submissions — see app/api/verify/route.ts.
+  callTracking: {
+    accountId: "264810",
+    // Absolute https, not the protocol-relative `//` form: the latter resolves
+    // against the page protocol and breaks when the page is opened over
+    // file:// or previewed over plain http.
+    src: "https://264810.tctm.co/t.js",
+  },
+  // Google Tag Manager container for this landing page. Carries GA4, Google
+  // Ads and Clarity only — t.js is loaded by the app itself (see layout).
+  gtm: {
+    id: "GTM-TC7PQ4LR",
+  },
+} as const;
+
 // Sticky trust banner (Section 1) — 4 columns per reference, with brief's text changes
 export const TRUST_BADGES = [
   { label: "Accredited for Excellence", sub: "Joint Commission standards" },

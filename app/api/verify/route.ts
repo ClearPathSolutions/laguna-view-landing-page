@@ -1,200 +1,42 @@
 import { NextResponse } from "next/server";
 import { LEAD_EMAIL } from "@/lib/site";
-
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-type Lead = {
-  firstName?: string;
-  lastName?: string;
-  phone?: string;
-  dob?: string;
-  insurer?: string;
-  memberId?: string;
-  ctmTracked?: boolean;
-  // Attribution, captured on first touch by lib/session.ts.
-  ctm_visitor_sid?: unknown;
-  page_url?: unknown;
-  landing_page_url?: unknown;
-  referrer?: unknown;
-  attribution?: unknown;
-  site_visit_id?: unknown;
-};
-
-const CTM_FORM_REACTOR_ID =
-  "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
-
-/** CTM session ids are 24 hex characters, no dashes. A UUID is not one. */
-const CTM_ID = /^[0-9a-f]{24}$/i;
+import { resolveVisitorSid, sanitizeRecord, sanitizeSession, text } from "@/lib/session-server";
 
 /**
- * The CTM visitor session id, preferring the browser's value and falling back
- * to the __ctmid cookie. __ctmid is first-party on lagunaviewdetox.com, so it
- * rides along on this same-origin POST — which means a client-side regression
- * cannot silently un-attribute every lead.
+ * Clarion lead relay for the insurance-verification form.
  *
- * Returns null rather than substituting this site's own session id: CTM files
- * the lead against no visit either way, and a plausible-looking wrong id would
- * hide the fact that t.js was blocked.
+ * Clarion is the system of record for admissions enquiries and the only
+ * destination that decides this endpoint's response. CallTrackingMetrics still
+ * runs on the page for the number swap and the visitor session, but receives no
+ * leads — Clarion attaches this one to the CTM visit itself, via
+ * `ctm_visitor_sid`. The CTM FormReactor path this route used to carry (both
+ * the server-side REST submission and the browser `__ctm.form.track` call) is
+ * gone; nothing here should reintroduce it.
+ *
+ * Reports the truth back to the browser: a 502 here makes the form show an
+ * error and the phone number rather than a confirmation, because a lead that
+ * silently vanished is worse than a visitor who knows to call.
+ *
+ * CLARION_SITE_KEY is server-side only and must never gain a NEXT_PUBLIC_
+ * prefix.
  */
-function ctmVisitorSid(lead: Lead, req: Request): string | null {
-  const fromClient = typeof lead.ctm_visitor_sid === "string" ? lead.ctm_visitor_sid : null;
-  if (fromClient && CTM_ID.test(fromClient)) return fromClient;
 
-  const raw = req.headers.get("cookie")?.match(/(?:^|;\s*)__ctmid=([^;]*)/)?.[1];
-  const fromCookie = raw ? decodeURIComponent(raw) : null;
-  if (fromCookie && CTM_ID.test(fromCookie)) {
-    if (fromClient) {
-      console.warn("[verify] browser sent a non-CTM sid; using the __ctmid cookie instead");
-    }
-    return fromCookie;
-  }
-  if (fromClient) {
-    // Log what we actually saw, but don't pass it on: CTM cannot match it, and
-    // a malformed visitor_sid risks CTM rejecting the whole submission. Losing
-    // an admissions enquiry to gain attribution is not a trade worth making.
-    console.warn(
-      "[verify] sid is not CTM-shaped and no __ctmid cookie — no visit will attach:",
-      fromClient.slice(0, 64)
-    );
-    return null;
-  }
-  console.warn("[verify] no CTM session id — t.js was likely blocked");
-  return null;
-}
+export const runtime = "nodejs";
+// Posts to a third party per request — never cache or prerender it.
+export const dynamic = "force-dynamic";
 
-// This endpoint is public and unauthenticated, and `attribution` is shaped
-// entirely by the client, so take only keys we know and cap their size.
-const ATTRIBUTION_KEYS = [
-  "utm_source",
-  "utm_medium",
-  "utm_campaign",
-  "utm_term",
-  "utm_content",
-  "gclid",
-  "gbraid",
-  "wbraid",
-  "fbclid",
-  "msclkid",
-  "campaignid",
-  "adgroupid",
-  "creativeid",
-] as const;
+const CLARION_ENDPOINT = "https://api.clarionlabs.ai/forms/public/submit";
 
-const MAX_VALUE_CHARS = 512;
+/** How submissions are grouped on Clarion's side. */
+const FORM_KEY = "insurance_verification";
 
-function cleanAttribution(raw: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
-  for (const key of ATTRIBUTION_KEYS) {
-    const v = (raw as Record<string, unknown>)[key];
-    if (typeof v === "string" && v) out[key] = v.slice(0, MAX_VALUE_CHARS);
-  }
-  return out;
-}
+/** Clarion wants utm as a nested object, keyed without the `utm_` prefix. */
+const UTM_KEYS = ["source", "medium", "campaign", "term", "content"] as const;
 
-function cleanUrl(raw: unknown): string {
-  return typeof raw === "string" ? raw.slice(0, 2048) : "";
-}
+/** Fields the form marks required — a lead missing one is unactionable. */
+const REQUIRED_FIELDS = ["first_name", "last_name", "phone", "insurance_provider"] as const;
 
-// Server-to-server submission to the CTM FormReactor (no CORS, no ad
-// blockers). Never throws — a CTM outage must not block lead delivery.
-async function sendToCtm(lead: Lead, sid: string | null): Promise<string> {
-  const key = process.env.CTM_FORMREACTOR_KEY;
-  if (!key) {
-    console.error("[verify] CTM_FORMREACTOR_KEY not set; skipping CTM submission");
-    return "no-key";
-  }
-  // CTM rejects submissions whose phone number isn't a valid dialable
-  // number, so normalize to bare digits without the leading country code.
-  let phone = String(lead.phone ?? "").replace(/\D/g, "");
-  if (phone.length === 11 && phone.startsWith("1")) phone = phone.slice(1);
-
-  const body = new URLSearchParams({
-    phone_number: phone,
-    country_code: "1",
-    caller_name: `${lead.firstName ?? ""} ${lead.lastName ?? ""}`.trim(),
-    // Formats per CTM's FormReactor API example: custom_fields[<api_name>]
-    // for form data, paid_attribution[...] for ad click data.
-    "custom_fields[date_of_birth]": lead.dob || "",
-    "custom_fields[insurance_provider]": lead.insurer || "",
-    "custom_fields[member_id]": lead.memberId || "",
-  });
-
-  // Link the lead to the CTM visitor session so it keeps ad attribution.
-  // 24 hex, no dashes — see ctmVisitorSid(). Omitted rather than faked when
-  // t.js was blocked, so an unattributed lead is visible instead of plausible.
-  if (sid) body.set("visitor_sid", sid);
-
-  // The real entry page, with its campaign — not the page the form sits on.
-  // Falls back to the current page only when nothing was ever captured.
-  const landing = cleanUrl(lead.landing_page_url) || cleanUrl(lead.page_url);
-  if (landing) body.set("custom_fields[landing_page_url]", landing);
-
-  // First-touch campaign, read from localStorage by the browser rather than
-  // from the URL at submit time. Reading it live is the whole Fault B: a
-  // visitor who lands on an ad and then reaches a clean URL submits as direct
-  // traffic, and the lead still delivers, so nothing ever surfaces the loss.
-  //
-  // Each UTM goes under both the utm_* name and the name CTM's Paid Ads Data
-  // panel rows use; CTM ignores keys it doesn't know. ValueTrack ids only
-  // arrive if the ad's final URL carries them (e.g. &campaignid={campaignid}).
-  const campaign = cleanAttribution(lead.attribution);
-  const CTM_ATTRIBUTION_KEYS: Array<[string, string]> = [
-    ["gclid", "gclid"],
-    ["gbraid", "gbraid"],
-    ["wbraid", "wbraid"],
-    ["utm_source", "utm_source"],
-    ["utm_source", "source"],
-    ["utm_medium", "utm_medium"],
-    ["utm_medium", "medium"],
-    ["utm_campaign", "utm_campaign"],
-    ["utm_campaign", "campaign"],
-    ["utm_campaign", "campaign_name"],
-    ["utm_content", "utm_content"],
-    ["utm_content", "ad_content"],
-    ["utm_content", "content"],
-    ["utm_term", "utm_term"],
-    ["utm_term", "keyword"],
-    ["utm_term", "term"],
-    ["campaignid", "campaign_id"],
-    ["adgroupid", "adgroup_id"],
-    ["creativeid", "creative_id"],
-  ];
-  for (const [param, ctmKey] of CTM_ATTRIBUTION_KEYS) {
-    const v = campaign[param];
-    if (v) body.set(`paid_attribution[${ctmKey}]`, v);
-  }
-  // gbraid/wbraid replace gclid under iOS and consent mode. CTM's own routing
-  // rules key on all three, so let either stand in for a missing gclid.
-  if (!campaign.gclid) {
-    const substitute = campaign.wbraid || campaign.gbraid;
-    if (substitute) body.set("paid_attribution[gclid]", substitute);
-  }
-
-  console.log("[verify] CTM payload:", body.toString());
-
-  try {
-    const res = await fetch(
-      `https://api.calltrackingmetrics.com/api/v1/formreactor/${CTM_FORM_REACTOR_ID}?key=${key}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString(),
-      }
-    );
-    const text = await res.text();
-    if (!res.ok) {
-      console.error("[verify] CTM formreactor error:", res.status, text);
-      return `rejected:${res.status}`;
-    }
-    console.log("[verify] CTM formreactor accepted:", text);
-    return "sent";
-  } catch (err) {
-    console.error("[verify] CTM formreactor request failed:", err);
-    return "error";
-  }
-}
+const CONFIRMATION = "Thank you — an admissions specialist will call you shortly.";
 
 function esc(v: unknown): string {
   return String(v ?? "")
@@ -203,49 +45,32 @@ function esc(v: unknown): string {
     .replace(/>/g, "&gt;");
 }
 
-export async function POST(req: Request) {
-  let lead: Lead;
-  try {
-    lead = (await req.json()) as Lead;
-  } catch {
-    return NextResponse.json({ error: "Invalid request." }, { status: 400 });
-  }
-
-  const { firstName, lastName, phone, insurer } = lead;
-  if (!firstName || !lastName || !phone || !insurer) {
-    return NextResponse.json(
-      { error: "Please complete all required fields." },
-      { status: 400 }
-    );
-  }
-
-  const sid = ctmVisitorSid(lead, req);
-  // The browser tracker already logged the lead in CTM (session-linked);
-  // only fall back to the REST API when that didn't happen.
-  const ctm = lead.ctmTracked ? "sent-by-browser" : await sendToCtm(lead, sid);
+/**
+ * Best-effort email copy, so admissions still sees the lead in an inbox.
+ *
+ * Deliberately cannot affect the response: Clarion already holds the lead by
+ * the time this runs, and telling someone in crisis to call again because a
+ * mail API was down would be wrong. Never throws.
+ */
+async function emailCopy(
+  data: Record<string, string>,
+  extras: Array<[string, string]>
+): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return;
 
   const to = process.env.LEAD_TO_EMAIL || LEAD_EMAIL;
   const from = process.env.LEAD_FROM_EMAIL || "Laguna View Website <onboarding@resend.dev>";
-  const apiKey = process.env.RESEND_API_KEY;
 
-  // Attribution goes in the email too, so marketing can reconcile a lead
-  // against CTM by hand when a visit failed to attach.
-  const campaign = cleanAttribution(lead.attribution);
-  const source = Object.entries(campaign)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(" · ");
-
-  const rows: Array<[string, unknown]> = [
-    ["Name", `${firstName} ${lastName}`],
-    ["Phone", phone],
-    ["Date of birth", lead.dob || "—"],
-    ["Insurance provider", insurer],
-    ["Member ID", lead.memberId || "—"],
-    ["Landing page", cleanUrl(lead.landing_page_url) || cleanUrl(lead.page_url) || "—"],
-    ["Referrer", cleanUrl(lead.referrer) || "direct"],
-    ["Campaign", source || "none captured"],
-    ["CTM visitor sid", sid || "none — t.js blocked, no visit attached"],
+  const rows: Array<[string, string]> = [
+    ["Name", `${data.first_name ?? ""} ${data.last_name ?? ""}`.trim()],
+    ["Phone", data.phone ?? "—"],
+    ["Date of birth", data.date_of_birth || "—"],
+    ["Insurance provider", data.insurance_provider || "—"],
+    ["Member ID", data.member_id || "—"],
+    ...extras,
   ];
+
   const html = `
     <h2 style="font-family:Georgia,serif;color:#011223">New insurance verification lead</h2>
     <table style="font-family:Arial,sans-serif;border-collapse:collapse">
@@ -258,22 +83,8 @@ export async function POST(req: Request) {
         )
         .join("")}
     </table>
-    <p style="font-family:Arial,sans-serif;color:#9aa">Submitted from the Laguna View landing page.</p>
+    <p style="font-family:Arial,sans-serif;color:#9aa">Submitted from the Laguna View landing page. Clarion holds the authoritative record.</p>
   `;
-
-  // No Resend key configured: log the lead so nothing is lost, and still succeed.
-  if (!apiKey) {
-    console.log("[verify] lead received (email delivery not configured):", {
-      ...lead,
-      to,
-    });
-    return NextResponse.json({
-      ok: true,
-      delivered: false,
-      ctm,
-      message: "Thank you — an admissions specialist will call you shortly.",
-    });
-  }
 
   try {
     const res = await fetch("https://api.resend.com/emails", {
@@ -285,39 +96,140 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         from,
         to: [to],
-        reply_to: undefined,
-        subject: `New verification lead — ${firstName} ${lastName}`,
+        subject: `New verification lead — ${data.first_name ?? ""} ${data.last_name ?? ""}`.trim(),
         html,
       }),
     });
-
     if (!res.ok) {
-      const detail = await res.text();
-      console.error("[verify] resend error:", res.status, detail);
-      // Don't lose the lead — log it and still tell the visitor we've got them.
-      console.log("[verify] lead (email failed):", lead);
-      return NextResponse.json({
-        ok: true,
-        delivered: false,
-        ctm,
-        message: "Thank you — an admissions specialist will call you shortly.",
-      });
+      console.error("[verify] email copy failed", res.status, await res.text().catch(() => ""));
+    }
+  } catch (error) {
+    console.error("[verify] email copy request failed", error);
+  }
+}
+
+export async function POST(request: Request) {
+  const siteKey = process.env.CLARION_SITE_KEY;
+  if (!siteKey) {
+    // Nothing the visitor can do about this, and we must not claim success.
+    console.error("[verify] CLARION_SITE_KEY is not set — lead not delivered");
+    return NextResponse.json({ ok: false }, { status: 502 });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ ok: false, error: "Invalid request." }, { status: 400 });
+  }
+
+  const data = sanitizeRecord(body.data);
+  if (!Object.keys(data).length) {
+    return NextResponse.json({ ok: false, error: "Invalid request." }, { status: 400 });
+  }
+
+  // The form sets `noValidate` so it can render its own messages, which means
+  // the browser enforces nothing — the check has to happen here.
+  if (REQUIRED_FIELDS.some((field) => !data[field])) {
+    return NextResponse.json(
+      { ok: false, error: "Please complete all required fields." },
+      { status: 400 }
+    );
+  }
+
+  const utmIn = sanitizeRecord(body.utm, { maxKeys: UTM_KEYS.length });
+  const utm: Record<string, string> = {};
+  for (const key of UTM_KEYS) {
+    if (utmIn[key]) utm[key] = utmIn[key];
+  }
+
+  const visitorSid = resolveVisitorSid(body.ctm_visitor_sid, request);
+  const landingPageUrl = text(body.landing_page_url, 2048);
+  const pageUrl = text(body.page_url, 2048);
+  const referrer = text(body.referrer, 2048);
+
+  const payload: Record<string, unknown> = {
+    site_key: siteKey,
+    form_key: FORM_KEY,
+    data,
+    page_url: pageUrl || null,
+    landing_page_url: landingPageUrl || null,
+    referrer: referrer || null,
+    utm: Object.keys(utm).length ? utm : null,
+    gclid: text(body.gclid) || null,
+    // This exact key name, flat and top-level, or Clarion drops it and the lead
+    // attaches to no visit.
+    ctm_visitor_sid: visitorSid || null,
+    user_agent: request.headers.get("user-agent"),
+    // This form has no opt-in control, so consent is never asserted. Only wire
+    // this to true alongside a real checkbox the visitor ticked themselves.
+    email_consent: false,
+  };
+
+  // Rebuilt from the client's version, never passed through. Null when absent
+  // or unsafe, and omitted entirely rather than sent as null.
+  const session = sanitizeSession(body.session);
+  if (session) payload.session = session;
+
+  const post = (payloadToSend: Record<string, unknown>) =>
+    fetch(CLARION_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payloadToSend),
+      cache: "no-store",
+    });
+
+  try {
+    let res = await post(payload);
+
+    // `session` is a key Clarion was not explicitly asked to accept. If their
+    // validation is strict, an unknown field would turn every lead into an
+    // error — so on a 4xx, drop it and try once more. Losing admissions
+    // enquiries to gain context is not a trade worth making.
+    if (!res.ok && res.status >= 400 && res.status < 500 && session) {
+      const rejection = await res.text().catch(() => "");
+      console.warn(
+        "[verify] Clarion rejected the payload",
+        res.status,
+        rejection,
+        "— retrying without `session`"
+      );
+      const { session: _dropped, ...withoutSession } = payload;
+      res = await post(withoutSession);
     }
 
-    return NextResponse.json({
-      ok: true,
-      delivered: true,
-      ctm,
-      message: "Thank you — an admissions specialist will call you shortly.",
-    });
-  } catch (err) {
-    console.error("[verify] unexpected error:", err);
-    console.log("[verify] lead (exception):", lead);
-    return NextResponse.json({
-      ok: true,
-      delivered: false,
-      ctm,
-      message: "Thank you — an admissions specialist will call you shortly.",
-    });
+    if (!res.ok) {
+      console.error("[verify] Clarion responded", res.status, await res.text().catch(() => ""));
+      // Log enough to recover the lead by hand, without the free-text clinical
+      // detail this form does not collect anyway.
+      console.error(
+        "[verify] undelivered lead",
+        JSON.stringify({ ...data, ctm_visitor_sid: visitorSid || null })
+      );
+      return NextResponse.json({ ok: false }, { status: 502 });
+    }
+  } catch (error) {
+    console.error("[verify] Clarion request failed", error);
+    console.error(
+      "[verify] undelivered lead",
+      JSON.stringify({ ...data, ctm_visitor_sid: visitorSid || null })
+    );
+    return NextResponse.json({ ok: false }, { status: 502 });
   }
+
+  // Clarion has the lead. The inbox copy is a convenience from here on, so it
+  // is awaited only to keep the serverless instance alive long enough to send.
+  await emailCopy(data, [
+    ["Landing page", landingPageUrl || pageUrl || "—"],
+    ["Referrer", referrer || "direct"],
+    [
+      "Campaign",
+      Object.entries(utm)
+        .map(([k, v]) => `utm_${k}=${v}`)
+        .join(" · ") || "none captured",
+    ],
+    ["CTM visitor sid", visitorSid || "none — t.js blocked, no visit attached"],
+  ]);
+
+  return NextResponse.json({ ok: true, message: CONFIRMATION });
 }

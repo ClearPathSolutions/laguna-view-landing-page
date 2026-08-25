@@ -45,20 +45,37 @@ vercel --prod   # production deploy
 
 ---
 
-## Environment variables (optional)
+## Lead delivery
 
-The insurance-verification form **works out of the box** — with no configuration, submissions are
-validated and logged server-side (visible in Vercel → your deployment → **Logs**). To actually
-**email** each lead, add a [Resend](https://resend.com) API key. Copy `.env.example` → `.env.local`
-locally, and add these in Vercel → **Settings → Environment Variables**:
+Insurance-verification submissions go to **Clarion** and nowhere else. `POST /api/verify` holds the
+site key and relays the lead to `api.clarionlabs.ai`, along with the visit session and first-touch
+campaign captured by `lib/session.ts`.
 
-| Variable          | Purpose                                              | Default                                   |
-| ----------------- | ---------------------------------------------------- | ----------------------------------------- |
-| `RESEND_API_KEY`  | Resend API key (`re_…`). Blank = log only, no email. | — (disabled)                              |
-| `LEAD_TO_EMAIL`   | Where verification leads are sent.                   | `admissions@quadranthealthgroup.com`      |
-| `LEAD_FROM_EMAIL` | Verified Resend sender.                              | `Laguna View Website <onboarding@resend.dev>` |
+CallTrackingMetrics still runs on the page — `t.js` (account `264810`, loaded from `lib/site.ts` by
+the root layout) owns the dynamic number swap and mints the visitor session — but **CTM receives no
+form submissions**. Clarion attaches each lead to the CTM visit itself, via `ctm_visitor_sid`. The
+old CTM FormReactor path, server-side and browser-side both, has been removed.
 
-> To send from your own domain, verify it in Resend and set `LEAD_FROM_EMAIL` to an address on it.
+If Clarion rejects or times out, the route returns **502** and the form shows an error and the phone
+number. That is deliberate: a lead that silently vanished is worse than a visitor who knows to call.
+
+> ⚠️ The GTM container (`GTM-TC7PQ4LR`) still carries a CTM tag (id 8) from when `t.js` was loaded
+> through GTM rather than by this app. **Pause it**, or `t.js` loads twice on every pageview.
+
+## Environment variables
+
+Set these in Vercel → **Settings → Environment Variables** (Production + Preview).
+
+| Variable            | Purpose                                                              | Default                                       |
+| ------------------- | -------------------------------------------------------------------- | --------------------------------------------- |
+| `CLARION_SITE_KEY`  | **Required.** Clarion site key. Server-only — never `NEXT_PUBLIC_`.  | — (form returns 502 without it)               |
+| `RESEND_API_KEY`    | Optional. Emails a copy of each lead. Blank = Clarion only.          | — (disabled)                                  |
+| `LEAD_TO_EMAIL`     | Where the email copy is sent.                                        | `admissions@quadranthealthgroup.com`          |
+| `LEAD_FROM_EMAIL`   | Verified Resend sender.                                              | `Laguna View Website <onboarding@resend.dev>`  |
+
+The Resend copy is best-effort convenience only: it runs after Clarion has accepted the lead and can
+never change the response the visitor sees. To send from your own domain, verify it in Resend and set
+`LEAD_FROM_EMAIL` to an address on it.
 
 ---
 

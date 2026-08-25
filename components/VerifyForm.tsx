@@ -2,66 +2,20 @@
 
 import { useState } from "react";
 import { PHONE_DISPLAY, PHONE_TEL } from "@/lib/site";
-import { attributionPayload, recordPageview } from "@/lib/session";
+import { recordPageview, submitVerificationLead } from "@/lib/session";
 import { CheckGold, LockIcon, PhoneIcon } from "./icons";
 
 type Status = "idle" | "submitting" | "success" | "error";
 
-// Leads go to CTM through the browser tracker (__ctm.form.track) so the
-// submission is tied to the visitor's web session — that's the only path
-// that gives CTM full session + paid-ads attribution. When the tracker is
-// unavailable (ad blocker), /api/verify falls back to CTM's REST API.
+// Leads go to Clarion via /api/verify, which holds the site key, and nowhere
+// else. CTM's t.js still runs on the page for the number swap and the visitor
+// session, but takes no form submissions: Clarion attaches the lead to that CTM
+// visit itself from the session id the route forwards.
 //
-// Exactly one of those two paths runs per submission: the server only calls
-// the REST API when ctmTracked came back false. Nothing else on this site
-// captures form submits — the GTM container carries only GA4, Google Ads,
-// Clarity and CTM's t.js — so a lead is never sent twice.
+// Nothing else on this page captures form submits — the GTM container carries
+// GA4, Google Ads and Clarity only, and its old CTM FormReactor tag is paused —
+// so a lead is never sent twice.
 const FORM_ID = "verify-benefits-form";
-const CTM_HOST = "app.calltrackingmetrics.com";
-const CTM_FORM_REACTOR_ID =
-  "FRT472ABB2C5B9B141A1FFF98722836BB0F6BAE7ADA045D98FCA64D850A3683001F";
-const CTM_TRACKING_NUMBER = "8664511021";
-
-// Resolves true only if the tracker confirmed the submission; false means
-// the caller should fall back to the server-side REST submission.
-function trackCtmLead(
-  fields: Record<string, string>,
-  attribution: ReturnType<typeof attributionPayload>
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const ctm = window.__ctm;
-    if (!ctm?.form?.track) return resolve(false);
-    const timer = setTimeout(() => resolve(false), 4000);
-    try {
-      ctm.form.track(
-        CTM_HOST,
-        CTM_FORM_REACTOR_ID,
-        CTM_TRACKING_NUMBER,
-        {
-          country_code: "1",
-          name: `${fields.firstName ?? ""} ${fields.lastName ?? ""}`.trim(),
-          phone: fields.phone ?? "",
-          custom: {
-            "date of birth": fields.dob ?? "",
-            "insurance provider": fields.insurer ?? "",
-            "member id": fields.memberId ?? "",
-            // First-touch entry page, not the page the form sits on. CTM's own
-            // session already carries the campaign; this is the visible backup
-            // for when the session was created after the query string was gone.
-            "landing page url": attribution.landing_page_url,
-          },
-        },
-        () => {
-          clearTimeout(timer);
-          resolve(true);
-        }
-      );
-    } catch {
-      clearTimeout(timer);
-      resolve(false);
-    }
-  });
-}
 
 const field =
   "w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-ink placeholder:text-body/50 focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30";
@@ -81,31 +35,30 @@ export default function VerifyForm() {
     // it is safe — it only rewrites first touch when the URL carries a fresh
     // ad click, which at this point is the same click it already recorded.
     recordPageview();
-    const attribution = attributionPayload();
 
-    // Session-linked CTM submission via the tracker; tell the server
-    // whether it succeeded so it only falls back when needed.
-    const ctmTracked = await trackCtmLead(fields, attribution);
+    const result = await submitVerificationLead({
+      firstName: fields.firstName ?? "",
+      lastName: fields.lastName ?? "",
+      phone: fields.phone ?? "",
+      dob: fields.dob,
+      insurer: fields.insurer,
+      memberId: fields.memberId,
+    });
 
-    const data = { ...fields, ...attribution, ctmTracked };
-
-    try {
-      const res = await fetch("/api/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || "Something went wrong.");
+    // The confirmation is gated on the lead actually being accepted. Showing it
+    // optimistically is what makes a dropped enquiry invisible to everyone.
+    if (result.ok) {
       setStatus("success");
-      setMessage(json?.message || "Thank you — an admissions specialist will call you shortly.");
+      setMessage(result.message || "Thank you — an admissions specialist will call you shortly.");
       form.reset();
-    } catch (err) {
-      setStatus("error");
-      setMessage(
-        err instanceof Error ? err.message : "Something went wrong. Please call us instead."
-      );
+      return;
     }
+
+    setStatus("error");
+    setMessage(
+      result.message ||
+        `We couldn't submit that just now. Please call ${PHONE_DISPLAY} and we'll help you straight away.`
+    );
   }
 
   return (

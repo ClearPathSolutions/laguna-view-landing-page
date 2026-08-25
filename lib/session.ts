@@ -1,32 +1,28 @@
-// First-touch attribution store + CTM identity.
+// First-touch attribution store, visit session, and CTM identity.
 //
-// Why this exists: the lead payload used to read utm/gclid out of
-// location.search at submit time. A visitor who lands on an ad and then
+// Lead delivery goes to Clarion and nowhere else. CallTrackingMetrics still
+// runs on the page — t.js owns the dynamic number swap and mints the visitor
+// session — but no form submission is ever sent to CTM. Clarion attaches the
+// lead to that CTM visit itself, via the `ctm_visitor_sid` passed through here.
+//
+// Why the first-touch store exists: the lead payload used to read utm/gclid out
+// of location.search at submit time. A visitor who lands on an ad and then
 // reloads, returns, or reaches the form from a clean URL converts with no
-// campaign attached at all — and because the lead still delivers and CTM
-// still returns 200, that failure is completely invisible. It shows up only
-// as paid spend that appears to convert at zero. So: capture on first touch,
-// read at submit time.
+// campaign attached at all — and because the lead still delivers and the
+// endpoint still returns 200, that failure is completely invisible. It shows up
+// only as paid spend that appears to convert at zero. So: capture on first
+// touch, read at submit time.
 //
 // localStorage, not sessionStorage: a second tab is the same visit, and CTM
 // keeps its own id in a 30-day first-party cookie, so a shorter-lived store
 // here could only ever be staler.
 
-// t.js is loaded by the GTM container (tag id 8), not by this app, so nothing
-// here can assume it has run — every read is guarded.
+// t.js is loaded by app/layout.tsx, but an ad-blocker can still stop it, so
+// every read of window.__ctm is guarded.
 declare global {
   interface Window {
     __ctm?: {
       config?: { aid?: number; sid?: string };
-      form?: {
-        track: (
-          host: string,
-          formReactorId: string,
-          trackingNumber: string,
-          fields: Record<string, unknown>,
-          callback: () => void
-        ) => void;
-      };
     };
   }
 }
@@ -36,6 +32,9 @@ const VISIT_KEY = "lvd.visit.v1";
 
 const CAMPAIGN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days — matches CTM's __ctmid
 const VISIT_IDLE_MS = 30 * 60 * 1000; // a 30-minute gap starts a new visit
+
+/** Enough to see the path through the page; bounded so the payload can't grow. */
+const MAX_TRACKED_PAGES = 20;
 
 // Campaign params worth keeping. gbraid/wbraid are Google's gclid substitutes
 // under iOS and consent mode — CTM account 264810's own routing rules key on
@@ -68,7 +67,19 @@ export type Campaign = {
   at: number;
 };
 
-type Visit = { id: string; startedAt: number; lastSeenAt: number; pageviews: number };
+type Visit = {
+  /**
+   * This site's own id for the visit. Deliberately a UUID so it can never be
+   * mistaken for CTM's 24-hex session id — substituting one for the other is
+   * the classic way to file a lead against no visit at all.
+   */
+  id: string;
+  startedAt: number;
+  lastSeenAt: number;
+  pageviews: number;
+  /** Paths only, never full URLs: a query string would repeat the ad params. */
+  pages?: string[];
+};
 
 function canStore(): boolean {
   return typeof window !== "undefined" && typeof localStorage !== "undefined";
@@ -158,13 +169,29 @@ export function recordPageview(): void {
   }
 
   const visit = readJson<Visit>(VISIT_KEY);
+  // A fresh ad click mid-visit re-attributes but does NOT split the visit: it
+  // is the same person continuing to browse, and breaking it in two would make
+  // the pageview count read lower than the journey actually was.
   const continuing = visit && now - visit.lastSeenAt < VISIT_IDLE_MS;
-  writeJson(
-    VISIT_KEY,
-    continuing
-      ? { ...visit!, lastSeenAt: now, pageviews: visit!.pageviews + 1 }
-      : { id: randomId(), startedAt: now, lastSeenAt: now, pageviews: 1 }
-  );
+  const base: Visit = continuing
+    ? { ...visit!, lastSeenAt: now }
+    : { id: randomId(), startedAt: now, lastSeenAt: now, pageviews: 0, pages: [] };
+
+  // Count a pageview only when the path actually changed. React StrictMode
+  // double-invokes effects in development, a remount or Fast Refresh can fire
+  // the tracker again on the same route, and VerifyForm calls this once more at
+  // submit time — without this the count arrives at Clarion inflated. The cost
+  // is that reloading the same URL is not counted twice, the better error.
+  const pages = base.pages ?? [];
+  const path = window.location.pathname;
+  if (pages[pages.length - 1] !== path) {
+    base.pages = [...pages, path].slice(-MAX_TRACKED_PAGES);
+    base.pageviews += 1;
+  } else {
+    base.pages = pages;
+  }
+
+  writeJson(VISIT_KEY, base);
 }
 
 /** First-touch campaign, or null when nothing has been recorded yet. */
@@ -172,6 +199,13 @@ export function getCampaign(): Campaign | null {
   const stored = readJson<Campaign>(CAMPAIGN_KEY);
   if (!stored || Date.now() - stored.at > CAMPAIGN_TTL_MS) return null;
   return stored;
+}
+
+/** The live visit, or null once it has gone idle past the window. */
+function getVisit(): Visit | null {
+  const visit = readJson<Visit>(VISIT_KEY);
+  if (!visit || typeof visit.id !== "string" || typeof visit.lastSeenAt !== "number") return null;
+  return Date.now() - visit.lastSeenAt < VISIT_IDLE_MS ? visit : null;
 }
 
 /**
@@ -186,9 +220,9 @@ export function getVisitId(): string | null {
 const CTM_ID = /^[0-9a-f]{24}$/i;
 
 /**
- * The CTM visitor session id, from t.js if it has run and from the __ctmid
- * first-party cookie otherwise. Returns null rather than substituting this
- * site's own session id — CTM files a lead against no visit either way, and a
+ * The CTM session id, from t.js if it has run and from the __ctmid first-party
+ * cookie otherwise. Returns null rather than substituting this site's own
+ * session id — Clarion attaches the lead to no visit either way, and a
  * plausible-looking wrong id hides the fact that t.js was blocked.
  */
 export function ctmVisitorSid(): string | null {
@@ -215,15 +249,130 @@ export function ctmVisitorSid(): string | null {
   return fromTjs || cookie || null;
 }
 
-/** Everything the lead endpoint needs to attribute a submission. */
-export function attributionPayload() {
+/* ------------------------------------------------------------------ */
+/* Lead delivery                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * No trailing slash: this app does not set `trailingSlash`, so adding one would
+ * make every lead pay a 308 redirect first.
+ */
+const VERIFY_ROUTE = "/api/verify";
+
+const UTM_KEYS = ["source", "medium", "campaign", "term", "content"] as const;
+
+/** Reshape the stored flat params into the payload Clarion expects. */
+function attributionPayload() {
   const campaign = getCampaign();
+  const params = campaign?.params ?? {};
+
+  const utm: Record<string, string> = {};
+  for (const key of UTM_KEYS) {
+    const value = params[`utm_${key}`];
+    if (value) utm[key] = value;
+  }
+
   return {
-    ctm_visitor_sid: ctmVisitorSid(),
     page_url: typeof window === "undefined" ? "" : window.location.href,
-    landing_page_url: campaign?.landingPageUrl || "",
-    referrer: campaign?.referrer || "",
-    attribution: campaign?.params || {},
-    site_visit_id: getVisitId(),
+    // The real entry page with its campaign on it, not wherever the form sits.
+    landing_page_url: campaign?.landingPageUrl || (typeof window === "undefined" ? "" : window.location.href),
+    referrer: campaign?.referrer || null,
+    utm: Object.keys(utm).length ? utm : null,
+    // wbraid / gbraid are what Google substitutes for gclid under iOS and
+    // consent mode. CTM's own routing rules key on all three, so a lead that
+    // only carries gclid loses exactly those clicks.
+    gclid: params.gclid || params.wbraid || params.gbraid || null,
   };
+}
+
+/**
+ * The visit context that goes alongside the answers: how long this person has
+ * been reading, how many pages they saw, what brought them here, and which CTM
+ * visit they are.
+ */
+function sessionPayload(visitorSid: string | null) {
+  const visit = getVisit();
+  if (!visit) return null;
+  const campaign = getCampaign();
+
+  return {
+    id: visit.id,
+    started_at: new Date(visit.startedAt).toISOString(),
+    last_active_at: new Date(visit.lastSeenAt).toISOString(),
+    duration_seconds: Math.max(0, Math.round((Date.now() - visit.startedAt) / 1000)),
+    pageviews: visit.pageviews,
+    pages: visit.pages ?? [],
+    entry_page: campaign?.landingPageUrl || null,
+    referrer: campaign?.referrer || null,
+    // The full flat set, including the params the top-level fields don't carry
+    // (msclkid, fbclid, campaignid, adgroupid, creativeid).
+    attribution: campaign?.params ?? {},
+    // Repeated here for context only. The flat top-level copy is the one
+    // Clarion reads.
+    ctm_visitor_sid: visitorSid,
+    ctm_account_id: (() => {
+      try {
+        return window.__ctm?.config?.aid ?? null;
+      } catch {
+        return null;
+      }
+    })(),
+  };
+}
+
+export type VerificationLead = {
+  firstName: string;
+  lastName: string;
+  phone: string;
+  dob?: string;
+  insurer?: string;
+  memberId?: string;
+};
+
+/**
+ * Deliver the lead to Clarion through this site's own route, which holds the
+ * site key.
+ *
+ * Resolves false on any failure so the caller shows an error and the phone
+ * number instead of a confirmation — a silently dropped admissions enquiry is
+ * the worst outcome available here.
+ */
+export async function submitVerificationLead(
+  lead: VerificationLead
+): Promise<{ ok: boolean; message?: string }> {
+  const visitorSid = ctmVisitorSid();
+
+  try {
+    const res = await fetch(VERIFY_ROUTE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: {
+          first_name: lead.firstName,
+          last_name: lead.lastName,
+          phone: lead.phone,
+          date_of_birth: lead.dob ?? "",
+          insurance_provider: lead.insurer ?? "",
+          member_id: lead.memberId ?? "",
+        },
+        ...attributionPayload(),
+        // Flat and top-level under this exact name, or Clarion drops it.
+        ctm_visitor_sid: visitorSid,
+        session: sessionPayload(visitorSid),
+      }),
+      // Lets the request finish if the visitor navigates away mid-submit.
+      keepalive: true,
+    });
+
+    const json = (await res.json().catch(() => null)) as
+      | { ok?: boolean; message?: string; error?: string }
+      | null;
+
+    if (res.ok && json?.ok === true) {
+      return { ok: true, message: json.message };
+    }
+    return { ok: false, message: json?.error };
+  } catch {
+    return { ok: false };
+  }
 }
