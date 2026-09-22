@@ -23,7 +23,7 @@ export default function CtaBar({ headline }: { headline: string }) {
           </ul>
         </div>
         <div className="flex shrink-0 flex-col gap-3 sm:flex-row">
-          <a href={`tel:${PHONE_TEL}`} className="btn-gold whitespace-nowrap">
+          <a href={`tel:${PHONE_TEL}`} className="btn-gold whitespace-nowrap" suppressHydrationWarning>
             <PhoneIcon className="h-4 w-4" />
             Call {PHONE_DISPLAY}
           </a>

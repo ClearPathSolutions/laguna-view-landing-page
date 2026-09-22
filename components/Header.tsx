@@ -53,7 +53,7 @@ export default function Header() {
             <a
               href={`tel:${PHONE_TEL}`}
               className="btn-gold gap-1.5 whitespace-nowrap px-3 py-2.5 text-sm sm:gap-2 sm:px-5"
-              aria-label={`Call ${PHONE_DISPLAY}`}
+              aria-label={`Call ${PHONE_DISPLAY}`} suppressHydrationWarning
             >
               <PhoneIcon className="h-4 w-4 shrink-0" />
               <span className="hidden sm:inline">Call Now</span>

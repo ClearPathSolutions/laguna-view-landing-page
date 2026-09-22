@@ -98,7 +98,7 @@ export default function VerifyForm() {
             <LockIcon className="h-6 w-6 text-gold" />
             <p className="text-sm text-cream/80">
               Prefer to talk? Call{" "}
-              <a href={`tel:${PHONE_TEL}`} className="font-semibold text-cream underline">
+              <a href={`tel:${PHONE_TEL}`} className="font-semibold text-cream underline" suppressHydrationWarning>
                 {PHONE_DISPLAY}
               </a>{" "}
               — available around the clock.
@@ -107,13 +107,13 @@ export default function VerifyForm() {
         </div>
 
         {/* Right: the form */}
-        <div className="rounded-3xl bg-white p-6 text-body shadow-card sm:p-8">
+        <div className="rounded-3xl bg-white p-6 text-body shadow-card sm:p-8" suppressHydrationWarning>
           {status === "success" ? (
             <div className="flex min-h-[420px] flex-col items-center justify-center text-center">
               <CheckGold className="h-16 w-16" />
               <h3 className="mt-4 font-serif text-2xl text-ink">You're all set.</h3>
               <p className="mt-2 max-w-sm text-body">{message}</p>
-              <a href={`tel:${PHONE_TEL}`} className="btn-gold mt-6">
+              <a href={`tel:${PHONE_TEL}`} className="btn-gold mt-6" suppressHydrationWarning>
                 <PhoneIcon className="h-4 w-4" />
                 Call {PHONE_DISPLAY}
               </a>

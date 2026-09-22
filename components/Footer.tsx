@@ -22,7 +22,7 @@ export default function Footer() {
               <p className="font-semibold text-cream">Contact</p>
               <ul className="mt-3 space-y-2">
                 <li>
-                  <a href={`tel:${PHONE_TEL}`} className="hover:text-cream">
+                  <a href={`tel:${PHONE_TEL}`} className="hover:text-cream" suppressHydrationWarning>
                     {PHONE_DISPLAY}
                   </a>
                 </li>

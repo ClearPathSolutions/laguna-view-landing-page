@@ -25,14 +25,14 @@ export default function CallCard({ className = "" }: { className?: string }) {
         </p>
         <a
           href={`tel:${PHONE_TEL}`}
-          className="mt-1 flex items-center gap-2 font-serif text-2xl font-semibold sm:text-3xl"
+          className="mt-1 flex items-center gap-2 font-serif text-2xl font-semibold sm:text-3xl" suppressHydrationWarning
         >
           <PhoneIcon className="h-6 w-6 text-gold" />
           {PHONE_DISPLAY}
         </a>
       </div>
 
-      <a href={`tel:${PHONE_TEL}`} className="btn-gold mt-4 w-full">
+      <a href={`tel:${PHONE_TEL}`} className="btn-gold mt-4 w-full" suppressHydrationWarning>
         <PhoneIcon className="h-4 w-4" />
         Call {PHONE_DISPLAY}
       </a>

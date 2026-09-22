@@ -36,7 +36,7 @@ import {
 
 function CallButton({ className = "" }: { className?: string }) {
   return (
-    <a href={`tel:${PHONE_TEL}`} className={`btn-gold ${className}`}>
+    <a href={`tel:${PHONE_TEL}`} className={`btn-gold ${className}`} suppressHydrationWarning>
       <PhoneIcon className="h-4 w-4" />
       Call {PHONE_DISPLAY}
     </a>
