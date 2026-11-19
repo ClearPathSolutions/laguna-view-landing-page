@@ -16,6 +16,7 @@
 // localStorage, not sessionStorage: a second tab is the same visit, and CTM
 // keeps its own id in a 30-day first-party cookie, so a shorter-lived store
 // here could only ever be staler.
+import { latestReferrer, rememberReferrer } from "./latest-referrer";
 
 // t.js is loaded by app/layout.tsx, but an ad-blocker can still stop it, so
 // every read of window.__ctm is guarded.
@@ -141,6 +142,7 @@ function randomId(): string {
  * ad click arrives mid-visit — that is a new campaign, not a continuation.
  */
 export function recordPageview(): void {
+  rememberReferrer();
   if (!canStore()) return;
 
   const now = Date.now();
@@ -276,7 +278,7 @@ function attributionPayload() {
     page_url: typeof window === "undefined" ? "" : window.location.href,
     // The real entry page with its campaign on it, not wherever the form sits.
     landing_page_url: campaign?.landingPageUrl || (typeof window === "undefined" ? "" : window.location.href),
-    referrer: campaign?.referrer || null,
+    referrer: latestReferrer() ?? (campaign?.referrer || null),
     utm: Object.keys(utm).length ? utm : null,
     // wbraid / gbraid are what Google substitutes for gclid under iOS and
     // consent mode. CTM's own routing rules key on all three, so a lead that
